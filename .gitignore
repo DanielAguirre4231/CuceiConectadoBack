@@ -1,0 +1,16 @@
+# Dependencias
+node_modules/
+__pycache__/
+venv/
+.venv/
+
+# Variables de entorno (SEGURIDAD)
+.env
+
+# Logs y bases de datos locales
+*.log
+postgres_data/
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
