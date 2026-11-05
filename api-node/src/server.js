@@ -3,7 +3,7 @@ const cors = require('cors');
 require('dotenv').config();
 const imgPath = require('path');
 
-const app = express(); // 👈 Única declaración limpia aquí
+const app = express(); // Única declaración limpia
 
 app.use(cors());
 app.use(express.json());
@@ -27,7 +27,11 @@ app.get('/', (req, res) => res.send('API de QCEI Conectado funcionando'));
 //RUTA DE IMAGENES (Asegúrate de que esté antes del listen)
 app.use('/uploads', express.static(imgPath.join(__dirname, '../uploads')));
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
     console.log(`Servidor listo en http://localhost:${PORT}`);
-});
+  });
+}
+
+module.exports = app;

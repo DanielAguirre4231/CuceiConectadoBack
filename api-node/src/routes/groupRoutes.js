@@ -2,60 +2,84 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 
+
 // ROUTE: /api/groups //
 
 //INSERT GROUP
 router.post('/insertGroup', async (req, res) => {
-    const { name, description, category_id, creator_id } = req.body;
+    const { name, description, category_id, creator_id, is_private } = req.body;
 
     if (!name || !category_id || !creator_id) {
         return res.status(400).json({ error: "Nombre, categoría y creador son obligatorios" });
     }
 
     try {
-        // 1. Insertamos el grupo
         const query = `
-            INSERT INTO public.GROUPS (NAME_GROUPS, DESC_GROUPS, ID_CATEGORIES_GROUPS, CREATOR_ID_GROUPS)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO public.groups (name_groups, desc_groups, id_categories_groups, creator_id_groups, is_private)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *;
         `;
-        const result = await pool.query(query, [name, description, category_id, creator_id]);
+        const result = await pool.query(query, [name, description, category_id, creator_id, is_private || false]);
         const newGroup = result.rows[0];
 
-        // 2. Unimos al creador automáticamente (Lógica de membresía)
+        // Registrar al creador automáticamente como miembro
         await pool.query(
-            'INSERT INTO public.USER_GROUPS (ID_USER, ID_GROUP) VALUES ($1, $2)',
+            'INSERT INTO public.user_groups (id_user, id_group) VALUES ($1, $2)',
             [creator_id, newGroup.id_groups]
         );
 
         res.status(201).json({
-            message: "Grupo creado y administrador registrado correctamente",
+            message: "Grupo creado exitosamente",
             group: newGroup
         });
-
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ error: "ERROR /insertGroup" });
+        console.error("Error en /insertGroup:", err.message);
+        res.status(500).json({ error: "Error al crear el grupo" });
     }
 });
 
 //JOIN GROUP
 router.post('/joinGroup', async (req, res) => {
-    const user_id = req.body.user_id;
-    const group_id = req.body.group_id;
+    const { user_id, group_id } = req.body;
 
     try {
-        await pool.query(
-            'INSERT INTO public.USER_GROUPS (ID_USER, ID_GROUP) VALUES ($1, $2)',
-            [user_id, group_id]
-        );
-        res.json({ message: "Membresía aceptada. ¡Bienvenido al grupo!" });
+        const groupRes = await pool.query('SELECT is_private FROM public.groups WHERE id_groups = $1', [group_id]);
+        if (groupRes.rows.length === 0) return res.status(404).json({ error: "Grupo no encontrado" });
+
+        const isPrivate = groupRes.rows[0].is_private;
+
+        if (isPrivate) {
+            // Verificar si ya envió una solicitud previamente
+            const checkReq = await pool.query(
+                'SELECT * FROM public.group_requests WHERE id_group = $1 AND id_user = $2',
+                [group_id, user_id]
+            );
+
+            if (checkReq.rows.length > 0) {
+                return res.status(400).json({ error: "Ya tienes una solicitud pendiente para este grupo." });
+            }
+
+            // Crear registro en la tabla group_requests
+            await pool.query(
+                'INSERT INTO public.group_requests (id_group, id_user) VALUES ($1, $2)',
+                [group_id, user_id]
+            );
+
+            return res.json({ status: 'PENDING', message: "Solicitud enviada al creador del grupo." });
+        } else {
+            // Grupo público: registro directo
+            await pool.query(
+                'INSERT INTO public.user_groups (id_user, id_group) VALUES ($1, $2)',
+                [user_id, group_id]
+            );
+            return res.json({ status: 'JOINED', message: "¡Te has unido al grupo exitosamente!" });
+        }
     } catch (err) {
-        console.error("Error detallado en /joinGroup:", err.message);
+        console.error("Error en /joinGroup:", err.message);
         if (err.code === '23505') { 
             return res.status(400).json({ error: "Ya eres miembro de este grupo" });
         }
-        res.status(500).json({ error: "ERROR /joinGroup" });
+        res.status(500).json({ error: "Error interno al procesar la solicitud" });
     }
 });
 
@@ -115,9 +139,14 @@ router.put('/updateGroup/:id', async (req, res) => {
                 DESC_GROUPS          = COALESCE($2, DESC_GROUPS),
                 ID_CATEGORIES_GROUPS = COALESCE($3, ID_CATEGORIES_GROUPS)
             WHERE ID_GROUPS = $4
-            RETURNING *
+            RETURNING *;
         `;
-        const result = await pool.query(query, [name, description, category_id, id]);
+        const result = await pool.query(query, [
+            name || null, 
+            description || null, 
+            category_id ? parseInt(category_id, 10) : null, 
+            id
+        ]);
 
         if (result.rows.length === 0) {
             return res.status(404).json({ error: "Grupo no encontrado" });
@@ -128,8 +157,8 @@ router.put('/updateGroup/:id', async (req, res) => {
             group: result.rows[0]
         });
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ error: "ERROR /updateGroup" });
+        console.error("Error en /updateGroup:", err.message);
+        res.status(500).json({ error: "ERROR /updateGroup", message: err.message });
     }
 });
 
@@ -138,11 +167,16 @@ router.delete('/deleteGroup/:id', async (req, res) => {
     const { id } = req.params;
 
     try {
-        // Ejecutamos el delete
-        const query = 'DELETE FROM public.GROUPS WHERE ID_GROUPS = $1 RETURNING *';
+        // 1. Eliminar publicaciones y comentarios vinculados
+        await pool.query('DELETE FROM public.posts_comments WHERE id_groups_posts_comments = $1', [id]);
+
+        // 2. Eliminar inscripciones de miembros
+        await pool.query('DELETE FROM public.user_groups WHERE id_group = $1', [id]);
+
+        // 3. Eliminar el grupo
+        const query = 'DELETE FROM public.GROUPS WHERE ID_GROUPS = $1 RETURNING *;';
         const result = await pool.query(query, [id]);
 
-        // Si no encontró el ID
         if (result.rows.length === 0) {
             return res.status(404).json({ error: "Grupo no encontrado o ya fue eliminado" });
         }
@@ -153,22 +187,8 @@ router.delete('/deleteGroup/:id', async (req, res) => {
         });
 
     } catch (err) {
-        console.error(err.message);
-        
-        // Error común: Intentar borrar un grupo que tiene registros asociados en USER_GROUPS o POSTS
-        if (err.code === '23503') {
-            return res.status(400).json({ 
-                error: "No se puede eliminar el grupo porque tiene miembros o publicaciones activas.",
-                detail: "Debes eliminar las dependencias primero o configurar ON DELETE CASCADE en tu DB."
-            });
-        }
-
-        // Error de formato UUID
-        if (err.code === '22P02') {
-            return res.status(400).json({ error: "ID de grupo inválido" });
-        }
-
-        res.status(500).json({ error: "ERROR /deleteGroup" });
+        console.error("Error en /deleteGroup:", err.message);
+        res.status(500).json({ error: "ERROR /deleteGroup", message: err.message });
     }
 });
 
@@ -216,6 +236,46 @@ router.delete('/leaveGroup', async (req, res) => {
     } catch (err) {
         console.error("Error al abandonar el grupo:", err);
         res.status(500).json({ error: "Error en el servidor al abandonar el grupo" });
+    }
+});
+
+// Obtener solicitudes pendientes del grupo
+router.get('/requests/:groupId', async (req, res) => {
+    const { groupId } = req.params;
+    try {
+        const query = `
+            SELECT gr.*, u.first_name_users, u.last_name_users, u.email_users, u.major_users
+            FROM public.group_requests gr
+            JOIN public.users u ON gr.id_user = u.id_users
+            WHERE gr.id_group = $1 AND gr.status = 'PENDING'
+            ORDER BY gr.created_at DESC;
+        `;
+        const result = await pool.query(query, [groupId]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error("Error al obtener solicitudes:", err.message);
+        res.status(500).json({ error: "Error al obtener solicitudes" });
+    }
+});
+
+// Aceptar o rechazar solicitud
+router.post('/respondRequest', async (req, res) => {
+    const { requestId, status, group_id, user_id } = req.body; // status: 'ACCEPTED' o 'REJECTED'
+
+    try {
+        if (status === 'ACCEPTED') {
+            await pool.query(
+                'INSERT INTO public.user_groups (id_user, id_group) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+                [user_id, group_id]
+            );
+        }
+
+        await pool.query('DELETE FROM public.group_requests WHERE id_request = $1', [requestId]);
+
+        res.json({ message: status === 'ACCEPTED' ? 'Usuario aceptado' : 'Solicitud rechazada' });
+    } catch (err) {
+        console.error("Error en /respondRequest:", err.message);
+        res.status(500).json({ error: "Error al procesar la respuesta" });
     }
 });
 
